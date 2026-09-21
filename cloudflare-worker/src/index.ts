@@ -29,17 +29,21 @@ export default {
   },
 
   // Lets you trigger a tick manually by visiting the Worker's URL — useful for
-  // testing the CRON_SECRET without waiting for the schedule. Safe to remove
-  // if you don't want an HTTP-triggerable version of this Worker.
+  // testing the CRON_SECRET without waiting for the schedule. TEMP: includes a
+  // debug line showing the length/first+last char of CRON_SECRET as loaded by
+  // this Worker (never the full value) to diagnose 401 mismatches. Remove once
+  // fixed.
   async fetch(_request: Request, env: Env): Promise<Response> {
+    const raw = env.CRON_SECRET ?? "";
+    const debugInfo = `[debug] CRON_SECRET as seen by this Worker: length=${raw.length}, first=${raw[0] ?? "∅"}, last=${raw[raw.length - 1] ?? "∅"}, hasLeadingSpace=${raw !== raw.trimStart()}, hasTrailingSpace=${raw !== raw.trimEnd()}`;
     try {
       const res = await callTick(env);
       const body = await res.text();
-      return new Response(`Tick triggered manually. Upstream status: ${res.status}\n\n${body}`, {
+      return new Response(`Tick triggered manually. Upstream status: ${res.status}\n${debugInfo}\n\n${body}`, {
         status: 200,
       });
     } catch (err) {
-      return new Response(`Failed to call upstream: ${(err as Error).message}`, { status: 502 });
+      return new Response(`Failed to call upstream: ${(err as Error).message}\n${debugInfo}`, { status: 502 });
     }
   },
 };
