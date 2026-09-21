@@ -7,7 +7,7 @@ import { computeMomentum, MOMENTUM_LOOKBACK_TICKS } from "@/lib/momentum";
 import { WATCHLIST } from "@/lib/watchlist";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 30;
+export const maxDuration = 60;
 
 const STARTING_EQUITY = 10000;
 
@@ -27,9 +27,12 @@ async function loadPrices(): Promise<Record<string, number>> {
 }
 
 // GET /api/tick — called by Vercel Cron (daily, see vercel.json) AND by a GitHub Actions
-// scheduled workflow (higher frequency, see .github/workflows/tick.yml) for denser price
-// history / more responsive momentum signal. Requires Authorization: Bearer <CRON_SECRET>
-// in production. Simulation only — no real exchange account or funds are touched.
+// scheduled workflow (higher frequency, see .github/workflows/tick.yml). Per-symbol work
+// (price tick log, momentum calc, Jev decision, optional simulated fill) runs in parallel
+// across the watchlist — with 20+ symbols, doing this sequentially exceeded Vercel's
+// function timeout. openCount is snapshotted once and incremented synchronously between
+// awaits, which is race-free under JS's single-threaded event loop. Simulation only —
+// no real exchange account or funds are touched anywhere in this file.
 export async function GET(request: NextRequest) {
   const cronSecret = process.env.CRON_SECRET;
   const authHeader = request.headers.get("authorization");
@@ -74,108 +77,109 @@ export async function GET(request: NextRequest) {
   }
 
   const client = getClient();
-  const results: any[] = [];
 
-  for (const symbol of Object.keys(WATCHLIST)) {
-    const markPrice = prices[symbol];
-    if (markPrice == null) {
-      results.push({ symbol, error: "no price available this tick" });
-      continue;
-    }
-    try {
-      await query("INSERT INTO price_ticks (symbol, price) VALUES ($1, $2)", [symbol, markPrice]);
+  const openCountRows = await query<{ count: string }>(
+    "SELECT COUNT(*) as count FROM positions WHERE status = 'open'"
+  );
+  let openCount = Number(openCountRows[0]?.count ?? 0);
 
-      const recentTicks = await query<{ price: string; recorded_at: string }>(
-        "SELECT price, recorded_at FROM price_ticks WHERE symbol = $1 ORDER BY recorded_at DESC LIMIT $2",
-        [symbol, MOMENTUM_LOOKBACK_TICKS]
-      );
-      const momentum = computeMomentum(
-        recentTicks.map((t) => ({ price: Number(t.price), recorded_at: t.recorded_at }))
-      );
-
-      const openPositions = await query<any>(
-        "SELECT * FROM positions WHERE symbol = $1 AND status = 'open'",
-        [symbol]
-      );
-
-      const state = buildState(
-        { question: `${symbol} perpetual, current state`, hoursToResolution: 1 },
-        { markPrice },
-        openPositions[0] ?? { size: 0 }
-      );
-
-      const decision: any = await routeDecision(client, state);
-      const answers = decision?.answers ?? {};
-
-      const needsResearch = answers.needs_research?.noul ?? null;
-      const sizeScore = answers.size_tier?.score ?? null;
-      const sizeConfidence = answers.size_tier?.confidence ?? null;
-      const needsApproval = answers.needs_human_approval?.noul ?? null;
-      const sizeTier = sizeScore != null ? Math.round(sizeScore) : null;
-
-      await query(
-        `INSERT INTO ai_decisions (symbol, needs_research, size_tier, needs_human_approval, confidence, raw_state)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [
-          symbol,
-          needsResearch != null ? needsResearch > 0.5 : null,
-          sizeTier,
-          needsApproval != null ? needsApproval > 0.5 : null,
-          sizeConfidence,
-          JSON.stringify({ state, answers, momentum }),
-        ]
-      );
-
-      let action = "logged_only";
-
-      const openCountRows = await query<{ count: string }>(
-        "SELECT COUNT(*) as count FROM positions WHERE status = 'open'"
-      );
-      const openCount = Number(openCountRows[0]?.count ?? 0);
-
-      const canOpen =
-        sizeTier != null &&
-        sizeTier > 0 &&
-        needsApproval != null &&
-        needsApproval <= 0.5 &&
-        momentum.direction != null &&
-        openPositions.length === 0 &&
-        openCount < RISK_LIMITS.MAX_CONCURRENT_POSITIONS;
-
-      if (canOpen) {
-        const usdSize = Math.min(sizeTierToUsd(sizeTier!), RISK_LIMITS.MAX_USD_PER_MARKET);
-        const { position, fill } = simulateFill(symbol, momentum.direction!, usdSize, markPrice);
-
-        await query("INSERT INTO positions (symbol, side, entry_price, size) VALUES ($1, $2, $3, $4)", [
-          position.symbol,
-          position.side,
-          position.entryPrice,
-          position.size,
-        ]);
-        await query("INSERT INTO fills (symbol, side, action, price, size, pnl) VALUES ($1, $2, $3, $4, $5, $6)", [
-          fill.symbol,
-          fill.side,
-          fill.action,
-          fill.price,
-          fill.size,
-          fill.pnl,
-        ]);
-        action = "simulated_fill";
+  const results = await Promise.all(
+    Object.keys(WATCHLIST).map(async (symbol) => {
+      const markPrice = prices[symbol];
+      if (markPrice == null) {
+        return { symbol, error: "no price available this tick" };
       }
+      try {
+        await query("INSERT INTO price_ticks (symbol, price) VALUES ($1, $2)", [symbol, markPrice]);
 
-      results.push({
-        symbol,
-        markPrice,
-        sizeTier,
-        needsApproval,
-        momentumDirection: momentum.direction,
-        momentumChangePct: momentum.changePct,
-        action,
-      });
-    } catch (err: any) {
-      results.push({ symbol, error: err.message });
-    }
-  }
+        const recentTicks = await query<{ price: string; recorded_at: string }>(
+          "SELECT price, recorded_at FROM price_ticks WHERE symbol = $1 ORDER BY recorded_at DESC LIMIT $2",
+          [symbol, MOMENTUM_LOOKBACK_TICKS]
+        );
+        const momentum = computeMomentum(
+          recentTicks.map((t) => ({ price: Number(t.price), recorded_at: t.recorded_at }))
+        );
+
+        const openPositions = await query<any>(
+          "SELECT * FROM positions WHERE symbol = $1 AND status = 'open'",
+          [symbol]
+        );
+
+        const state = buildState(
+          { question: `${symbol} perpetual, current state`, hoursToResolution: 1 },
+          { markPrice },
+          openPositions[0] ?? { size: 0 }
+        );
+
+        const decision: any = await routeDecision(client, state);
+        const answers = decision?.answers ?? {};
+
+        const needsResearch = answers.needs_research?.noul ?? null;
+        const sizeScore = answers.size_tier?.score ?? null;
+        const sizeConfidence = answers.size_tier?.confidence ?? null;
+        const needsApproval = answers.needs_human_approval?.noul ?? null;
+        const sizeTier = sizeScore != null ? Math.round(sizeScore) : null;
+
+        await query(
+          `INSERT INTO ai_decisions (symbol, needs_research, size_tier, needs_human_approval, confidence, raw_state)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [
+            symbol,
+            needsResearch != null ? needsResearch > 0.5 : null,
+            sizeTier,
+            needsApproval != null ? needsApproval > 0.5 : null,
+            sizeConfidence,
+            JSON.stringify({ state, answers, momentum }),
+          ]
+        );
+
+        let action = "logged_only";
+
+        const canOpen =
+          sizeTier != null &&
+          sizeTier > 0 &&
+          needsApproval != null &&
+          needsApproval <= 0.5 &&
+          momentum.direction != null &&
+          openPositions.length === 0 &&
+          openCount < RISK_LIMITS.MAX_CONCURRENT_POSITIONS;
+
+        if (canOpen) {
+          openCount++;
+          const usdSize = Math.min(sizeTierToUsd(sizeTier!), RISK_LIMITS.MAX_USD_PER_MARKET);
+          const { position, fill } = simulateFill(symbol, momentum.direction!, usdSize, markPrice);
+
+          await query("INSERT INTO positions (symbol, side, entry_price, size) VALUES ($1, $2, $3, $4)", [
+            position.symbol,
+            position.side,
+            position.entryPrice,
+            position.size,
+          ]);
+          await query("INSERT INTO fills (symbol, side, action, price, size, pnl) VALUES ($1, $2, $3, $4, $5, $6)", [
+            fill.symbol,
+            fill.side,
+            fill.action,
+            fill.price,
+            fill.size,
+            fill.pnl,
+          ]);
+          action = "simulated_fill";
+        }
+
+        return {
+          symbol,
+          markPrice,
+          sizeTier,
+          needsApproval,
+          momentumDirection: momentum.direction,
+          momentumChangePct: momentum.changePct,
+          action,
+        };
+      } catch (err: any) {
+        return { symbol, error: err.message };
+      }
+    })
+  );
 
   const openRows = await query<any>("SELECT * FROM positions WHERE status = 'open'");
   let unrealized = 0;
