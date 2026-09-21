@@ -10,6 +10,7 @@ export interface PaperPosition {
 
 export interface PaperFill {
   symbol: string;
+  side: "long" | "short";
   action: "open_long" | "open_short" | "close";
   price: number;
   size: number;
@@ -29,6 +30,7 @@ export function simulateFill(
     position: { symbol, side, entryPrice: markPrice, size, openedAt: now },
     fill: {
       symbol,
+      side,
       action: side === "long" ? "open_long" : "open_short",
       price: markPrice,
       size,

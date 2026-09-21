@@ -8,7 +8,6 @@ import { computeMomentum, MOMENTUM_LOOKBACK_TICKS } from "@/lib/momentum";
 export const dynamic = "force-dynamic";
 export const maxDuration = 30;
 
-// symbol -> CoinGecko coin id
 const WATCHLIST: Record<string, string> = {
   BTCUSDT: "bitcoin",
   ETHUSDT: "ethereum",
@@ -31,15 +30,6 @@ async function loadPrices(): Promise<Record<string, number>> {
   return bySymbol;
 }
 
-// GET /api/tick — called by Vercel Cron (daily, see vercel.json) or manually for testing.
-// Requires Authorization: Bearer <CRON_SECRET> in production. Flow each run:
-//   1. Check every OPEN position against stop-loss/take-profit and auto-close if hit.
-//   2. Fetch prices, log a price tick, compute momentum direction (lib/momentum.ts).
-//   3. Route through Jev for triage/sizing/approval (Jev never decides direction).
-//   4. Open a new simulated position only if Jev sizing + momentum direction + risk
-//      limits all agree.
-//   5. Snapshot total equity.
-// Simulation only — no real exchange account or funds are touched anywhere in this file.
 export async function GET(request: NextRequest) {
   const cronSecret = process.env.CRON_SECRET;
   const authHeader = request.headers.get("authorization");
@@ -58,7 +48,6 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ status: "error", message: `Price fetch failed: ${err.message}` }, { status: 502 });
   }
 
-  // Step 1: check open positions for stop-loss / take-profit, close if triggered.
   const closedThisRun: any[] = [];
   const openBefore = await query<any>("SELECT * FROM positions WHERE status = 'open'");
   for (const p of openBefore) {
@@ -72,8 +61,9 @@ export async function GET(request: NextRequest) {
     if (pnlPct <= -RISK_LIMITS.STOP_LOSS_PCT || pnlPct >= RISK_LIMITS.TAKE_PROFIT_PCT) {
       const pnlUsd = direction * (price - entry) * size;
       await query("UPDATE positions SET status = 'closed', closed_at = now() WHERE id = $1", [p.id]);
-      await query("INSERT INTO fills (symbol, action, price, size, pnl) VALUES ($1, $2, $3, $4, $5)", [
+      await query("INSERT INTO fills (symbol, side, action, price, size, pnl) VALUES ($1, $2, $3, $4, $5, $6)", [
         p.symbol,
+        p.side,
         "close",
         price,
         size,
@@ -162,8 +152,9 @@ export async function GET(request: NextRequest) {
           position.entryPrice,
           position.size,
         ]);
-        await query("INSERT INTO fills (symbol, action, price, size, pnl) VALUES ($1, $2, $3, $4, $5)", [
+        await query("INSERT INTO fills (symbol, side, action, price, size, pnl) VALUES ($1, $2, $3, $4, $5, $6)", [
           fill.symbol,
+          fill.side,
           fill.action,
           fill.price,
           fill.size,
@@ -194,7 +185,7 @@ export async function GET(request: NextRequest) {
     const direction = p.side === "long" ? 1 : -1;
     unrealized += direction * (price - Number(p.entry_price)) * Number(p.size);
   }
-  const realizedRows = await query<any>("SELECT COALESCE(SUM(pnl), 0) as total FROM fills");
+  const realizedRows = await query<any>("SELECT COALESCE(SUM(pnl), 0) as total FROM fills WHERE action = 'close'");
   const realized = Number(realizedRows[0]?.total ?? 0);
   const equity = STARTING_EQUITY + realized + unrealized;
 
