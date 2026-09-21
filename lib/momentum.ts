@@ -4,6 +4,12 @@
 // This module looks at recent recorded ticks and infers direction from the percent
 // change over the lookback window. If the move is too small, no direction is given
 // and the caller should NOT open a position, regardless of what Jev's size_tier says.
+//
+// Parameters below (1% threshold, 3-tick lookback) come from a simple backtest run
+// on 90 days of daily BTC/ETH/AVAX prices (see project notes / chat history). That
+// backtest used in-sample data only, no train/test split, no fees or slippage, and
+// covered a period that included a strong rally — treat these as a documented
+// starting point, not a validated trading edge.
 
 export interface Tick {
   price: number;
@@ -16,9 +22,8 @@ export interface MomentumResult {
   ticksUsed: number;
 }
 
-// 0.15% move across the lookback window is required before we call a direction.
-// This is intentionally conservative for a paper-trading demo, not a tuned strategy.
-const MOMENTUM_THRESHOLD = 0.0015;
+export const MOMENTUM_THRESHOLD = 0.01; // 1% move across the lookback window
+export const MOMENTUM_LOOKBACK_TICKS = 3;
 
 export function computeMomentum(ticks: Tick[]): MomentumResult {
   if (ticks.length < 2) {
