@@ -3,7 +3,7 @@ import { TypeSafeClient, choice, noul, score } from "@typesafe-ai/sdk";
 // Jev is a router, not a forecaster. It never predicts market direction.
 // All instructions/criteria live here, not in field names (Jev cannot see field names).
 
-export interface MarketState {
+export interface MarketState extends Record<string, unknown> {
   market_question: string;
   mark_price?: number;
   your_position: Record<string, unknown>;
