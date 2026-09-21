@@ -1,4 +1,5 @@
 import { query } from "@/lib/db";
+import LogStream from "@/components/LogStream";
 
 export const dynamic = "force-dynamic";
 
@@ -140,6 +141,8 @@ export default async function Page() {
         </div>
         <Sparkline values={equityCurve} />
       </div>
+
+      <LogStream />
 
       <div className="card">
         <strong>交易绩效</strong>
