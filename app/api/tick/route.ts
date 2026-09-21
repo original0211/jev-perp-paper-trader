@@ -5,24 +5,37 @@ import { query } from "@/lib/db";
 export const dynamic = "force-dynamic";
 export const maxDuration = 30;
 
-const WATCHLIST = ["BTCUSDT", "ETHUSDT", "AVAXUSDT"];
+// symbol -> CoinGecko coin id
+const WATCHLIST: Record<string, string> = {
+  BTCUSDT: "bitcoin",
+  ETHUSDT: "ethereum",
+  AVAXUSDT: "avalanche-2",
+};
 const STARTING_EQUITY = 10000;
 
-async function getMarkPrice(symbol: string): Promise<number> {
-  const res = await fetch(`https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${symbol}`, {
+const priceCache = new Map<string, number>();
+
+async function loadPrices(): Promise<Record<string, number>> {
+  const ids = Object.values(WATCHLIST).join(",");
+  const res = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd`, {
     cache: "no-store",
   });
-  if (!res.ok) throw new Error(`Failed to fetch price for ${symbol}: ${res.status}`);
+  if (!res.ok) throw new Error(`Failed to fetch prices: ${res.status}`);
   const data = await res.json();
-  return Number(data.markPrice);
+  const bySymbol: Record<string, number> = {};
+  for (const [symbol, coinId] of Object.entries(WATCHLIST)) {
+    const price = data[coinId]?.usd;
+    if (price != null) bySymbol[symbol] = Number(price);
+  }
+  return bySymbol;
 }
 
-// GET /api/tick — read-only market data in, Jev triage/sizing/approval decisions logged.
-// Does NOT open simulated positions yet: Jev is a router and deliberately never decides
-// market direction, and no separate forecasting module exists in this project yet to
-// supply one. Opening a position needs a direction from somewhere; guessing one here
-// would make the paper-trading results meaningless. This endpoint is safe to run on a
-// schedule as-is: it only reads public market data and writes decision/telemetry rows.
+// GET /api/tick — read-only market data in (CoinGecko, no region restrictions), Jev
+// triage/sizing/approval decisions logged. Does NOT open simulated positions yet:
+// Jev is a router and deliberately never decides market direction, and no separate
+// forecasting module exists in this project yet to supply one. This endpoint only
+// reads public market data and writes decision/telemetry rows — safe to run on a
+// schedule as-is.
 export async function GET() {
   if (process.env.KILL_SWITCH === "true") {
     return NextResponse.json({ status: "killed", message: "KILL_SWITCH is active. No action taken." });
@@ -31,10 +44,20 @@ export async function GET() {
   const client = getClient();
   const results: any[] = [];
 
-  for (const symbol of WATCHLIST) {
-    try {
-      const markPrice = await getMarkPrice(symbol);
+  let prices: Record<string, number> = {};
+  try {
+    prices = await loadPrices();
+  } catch (err: any) {
+    return NextResponse.json({ status: "error", message: `Price fetch failed: ${err.message}` }, { status: 502 });
+  }
 
+  for (const symbol of Object.keys(WATCHLIST)) {
+    const markPrice = prices[symbol];
+    if (markPrice == null) {
+      results.push({ symbol, error: "no price available this tick" });
+      continue;
+    }
+    try {
       const openPositions = await query<any>(
         "SELECT * FROM positions WHERE symbol = $1 AND status = 'open'",
         [symbol]
@@ -80,13 +103,10 @@ export async function GET() {
   const openRows = await query<any>("SELECT * FROM positions WHERE status = 'open'");
   let unrealized = 0;
   for (const p of openRows) {
-    try {
-      const price = await getMarkPrice(p.symbol);
-      const direction = p.side === "long" ? 1 : -1;
-      unrealized += direction * (price - Number(p.entry_price)) * Number(p.size);
-    } catch {
-      // skip symbols we can't price this tick
-    }
+    const price = prices[p.symbol];
+    if (price == null) continue;
+    const direction = p.side === "long" ? 1 : -1;
+    unrealized += direction * (price - Number(p.entry_price)) * Number(p.size);
   }
   const realizedRows = await query<any>("SELECT COALESCE(SUM(pnl), 0) as total FROM fills");
   const realized = Number(realizedRows[0]?.total ?? 0);
