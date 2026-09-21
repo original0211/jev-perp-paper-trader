@@ -11,6 +11,8 @@ export default function PriceChart({ symbols }: { symbols: string[] }) {
   const seriesRefs = useRef<Record<string, ISeriesApi<"Line">>>({});
   const [active, setActive] = useState<string>(symbols[0] ?? "");
   const [error, setError] = useState<string | null>(null);
+  const [hasData, setHasData] = useState<Record<string, boolean>>({});
+  const [lastUpdated, setLastUpdated] = useState<string | null>(null);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -44,8 +46,10 @@ export default function PriceChart({ symbols }: { symbols: string[] }) {
         const data = await res.json();
         if (!alive || !chartRef.current) return;
 
+        const nextHasData: Record<string, boolean> = {};
         symbols.forEach((sym, i) => {
           const points = data.symbols?.[sym] ?? [];
+          nextHasData[sym] = points.length > 0;
           if (points.length === 0) return;
           let series = seriesRefs.current[sym];
           if (!series) {
@@ -58,8 +62,10 @@ export default function PriceChart({ symbols }: { symbols: string[] }) {
           }
           series.setData(points as LineData[]);
         });
+        setHasData(nextHasData);
         chartRef.current.timeScale().fitContent();
         setError(null);
+        setLastUpdated(new Date().toLocaleTimeString());
       } catch (err: any) {
         if (alive) setError(err.message);
       }
@@ -79,21 +85,45 @@ export default function PriceChart({ symbols }: { symbols: string[] }) {
     });
   }, [active]);
 
+  const activeHasData = hasData[active];
+
   return (
     <div>
-      <div style={{ display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap" }}>
-        {symbols.map((sym) => (
-          <button
-            key={sym}
-            onClick={() => setActive(sym)}
-            className={`tag ${active === sym ? "tag-long" : "tag-no"}`}
-            style={{ border: "none", cursor: "pointer" }}
-          >
-            {sym}
-          </button>
-        ))}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, flexWrap: "wrap", gap: 6 }}>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {symbols.map((sym) => (
+            <button
+              key={sym}
+              onClick={() => setActive(sym)}
+              className={`tag ${active === sym ? "tag-long" : "tag-no"}`}
+              style={{ border: "none", cursor: "pointer" }}
+            >
+              {sym}
+            </button>
+          ))}
+        </div>
+        <span className="muted">{lastUpdated ? `最近刷新 ${lastUpdated}` : "加载中..."}</span>
       </div>
-      <div ref={containerRef} style={{ width: "100%" }} />
+      <div style={{ position: "relative" }}>
+        <div ref={containerRef} style={{ width: "100%" }} />
+        {activeHasData === false && (
+          <div
+            style={{
+              position: "absolute",
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              pointerEvents: "none",
+            }}
+          >
+            <span className="muted">{active} 暂无价格数据，等待下一次数据采集（详见页面底部说明）。</span>
+          </div>
+        )}
+      </div>
       {error && <div className="muted red">价格数据加载异常: {error}</div>}
     </div>
   );
