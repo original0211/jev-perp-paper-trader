@@ -1,0 +1,19 @@
+name = "jev-tick-trigger"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+
+# Free plan: minimum 1-minute interval, max 3 triggers per Worker.
+# 5-minute cadence is a reasonable default — each tick fans out to every
+# symbol in lib/watchlist.ts and calls the Jev API per symbol, so going
+# much higher-frequency multiplies Jev API usage accordingly. Adjust freely.
+[triggers]
+crons = ["*/5 * * * *"]
+
+[vars]
+# Fill in your production domain if it ever changes.
+TARGET_URL = "https://jev-perp-paper-trader.vercel.app/api/tick"
+
+# CRON_SECRET must be set as a Worker secret, NOT here (never commit secrets):
+#   wrangler secret put CRON_SECRET
+# or via the Cloudflare dashboard: Workers & Pages > jev-tick-trigger > Settings > Variables and Secrets.
+# Its value must exactly match the CRON_SECRET env var configured on the Vercel project.
