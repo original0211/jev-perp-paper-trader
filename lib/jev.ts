@@ -26,8 +26,10 @@ export function getClient(): TypeSafeClient {
 }
 
 export async function routeDecision(client: TypeSafeClient, state: MarketState) {
+  // Cast to `any` here: MarketState is plain JSON-serializable at runtime, but the SDK's
+  // JsonValue union type inference gets confused by nested Record<string, unknown> fields.
   return client.systemOne({
-    state,
+    state: state as any,
     questions: {
       needs_research: noul(
         "Has anything changed (price move, new research_note) since we last looked, that would justify a new research call on this market?"
