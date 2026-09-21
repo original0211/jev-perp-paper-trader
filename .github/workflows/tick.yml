@@ -1,0 +1,16 @@
+name: High-frequency tick trigger
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call /api/tick
+        run: |
+          curl -sS -f -X GET "https://jev-perp-paper-trader.vercel.app/api/tick" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            -w "\nHTTP status: %{http_code}\n"

@@ -1,5 +1,8 @@
 import { query } from "@/lib/db";
 import LogStream from "@/components/LogStream";
+import EquityChart from "@/components/EquityChart";
+import PriceChart from "@/components/PriceChart";
+import { WATCHLIST } from "@/lib/watchlist";
 
 export const dynamic = "force-dynamic";
 
@@ -37,26 +40,6 @@ interface SnapshotRow {
 }
 
 const STARTING_EQUITY = 10000;
-
-function Sparkline({ values }: { values: number[] }) {
-  if (values.length < 2) {
-    return <div className="muted">暂无净值历史记录（尚未产生 performance_snapshots 数据）。</div>;
-  }
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const points = values
-    .map((v, i) => {
-      const x = (i / (values.length - 1)) * 100;
-      const y = 100 - ((v - min) / (max - min || 1)) * 100;
-      return `${x},${y}`;
-    })
-    .join(" ");
-  return (
-    <svg viewBox="0 0 100 100" preserveAspectRatio="none" style={{ width: "100%", height: 120 }}>
-      <polyline points={points} fill="none" stroke="#4ade80" strokeWidth={2} />
-    </svg>
-  );
-}
 
 function SideTag({ side }: { side: string | null }) {
   if (!side) return <span className="muted">-</span>;
@@ -139,7 +122,14 @@ export default async function Page() {
             </span>
           </div>
         </div>
-        <Sparkline values={equityCurve} />
+        <EquityChart />
+      </div>
+
+      <div className="card">
+        <strong>多品种行情</strong>
+        <div style={{ marginTop: 10 }}>
+          <PriceChart symbols={Object.keys(WATCHLIST)} />
+        </div>
       </div>
 
       <LogStream />

@@ -4,15 +4,11 @@ import { query } from "@/lib/db";
 import { RISK_LIMITS, sizeTierToUsd } from "@/lib/risk";
 import { simulateFill } from "@/lib/paper-engine";
 import { computeMomentum, MOMENTUM_LOOKBACK_TICKS } from "@/lib/momentum";
+import { WATCHLIST } from "@/lib/watchlist";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 30;
 
-const WATCHLIST: Record<string, string> = {
-  BTCUSDT: "bitcoin",
-  ETHUSDT: "ethereum",
-  AVAXUSDT: "avalanche-2",
-};
 const STARTING_EQUITY = 10000;
 
 async function loadPrices(): Promise<Record<string, number>> {
@@ -30,6 +26,10 @@ async function loadPrices(): Promise<Record<string, number>> {
   return bySymbol;
 }
 
+// GET /api/tick — called by Vercel Cron (daily, see vercel.json) AND by a GitHub Actions
+// scheduled workflow (higher frequency, see .github/workflows/tick.yml) for denser price
+// history / more responsive momentum signal. Requires Authorization: Bearer <CRON_SECRET>
+// in production. Simulation only — no real exchange account or funds are touched.
 export async function GET(request: NextRequest) {
   const cronSecret = process.env.CRON_SECRET;
   const authHeader = request.headers.get("authorization");
