@@ -1,25 +1,45 @@
-// Mock data only. No real exchange connection, no real funds.
-// Layout mirrors: equity curve, current positions, AI decision log, fills, performance stats.
+import { query } from "@/lib/db";
 
-const mockEquityCurve = [10000, 10000, 9985, 10042, 10120, 10093, 10210, 10305];
+export const dynamic = "force-dynamic";
 
-const mockPositions = [
-  { symbol: "AVAXUSDT", side: "short", entry: 10.05, pnlPct: 0.4, confidence: 34 },
-  { symbol: "AVAUSDT", side: "long", entry: 0.237, pnlPct: 0.63, confidence: 59 },
-];
+interface PositionRow {
+  symbol: string;
+  side: "long" | "short";
+  entry_price: string;
+  size: string;
+  opened_at: string;
+}
 
-const mockDecisions = [
-  { symbol: "AVAUSDT", label: "chase_long", confidence: 0.59, time: "09:06:54" },
-  { symbol: "AVAXUSDT", label: "hold", confidence: 0.37, time: "09:06:19" },
-  { symbol: "AVAXUSDT", label: "chase_short", confidence: 0.34, time: "09:05:14" },
-];
+interface DecisionRow {
+  symbol: string;
+  size_tier: number | null;
+  confidence: string | null;
+  needs_human_approval: boolean | null;
+  decided_at: string;
+}
 
-const mockFills = [
-  { symbol: "AVAUSDT", action: "open_long", price: 0.237, pnl: 0, time: "09:06:54" },
-  { symbol: "AVAXUSDT", action: "open_short", price: 10.05, pnl: 0, time: "09:05:14" },
-];
+interface FillRow {
+  symbol: string;
+  action: string;
+  price: string;
+  pnl: string;
+  filled_at: string;
+}
+
+interface SnapshotRow {
+  equity: string;
+  realized_pnl: string;
+  unrealized_pnl: string;
+  win_rate: string | null;
+  snapshot_at: string;
+}
+
+const STARTING_EQUITY = 10000;
 
 function Sparkline({ values }: { values: number[] }) {
+  if (values.length < 2) {
+    return <div className="muted">暂无净值历史记录（尚未产生 performance_snapshots 数据）。</div>;
+  }
   const min = Math.min(...values);
   const max = Math.max(...values);
   const points = values
@@ -36,18 +56,33 @@ function Sparkline({ values }: { values: number[] }) {
   );
 }
 
-export default function Page() {
-  const equity = mockEquityCurve[mockEquityCurve.length - 1];
-  const start = mockEquityCurve[0];
-  const pnl = equity - start;
+export default async function Page() {
+  const [positions, decisions, fills, snapshots] = await Promise.all([
+    query<PositionRow>(
+      "SELECT symbol, side, entry_price, size, opened_at FROM positions WHERE status = 'open' ORDER BY opened_at DESC LIMIT 20"
+    ),
+    query<DecisionRow>(
+      "SELECT symbol, size_tier, confidence, needs_human_approval, decided_at FROM ai_decisions ORDER BY decided_at DESC LIMIT 10"
+    ),
+    query<FillRow>(
+      "SELECT symbol, action, price, pnl, filled_at FROM fills ORDER BY filled_at DESC LIMIT 10"
+    ),
+    query<SnapshotRow>(
+      "SELECT equity, realized_pnl, unrealized_pnl, win_rate, snapshot_at FROM performance_snapshots ORDER BY snapshot_at ASC LIMIT 200"
+    ),
+  ]);
+
+  const equityCurve = snapshots.length > 0 ? snapshots.map((s) => Number(s.equity)) : [STARTING_EQUITY];
+  const equity = equityCurve[equityCurve.length - 1];
+  const pnl = equity - STARTING_EQUITY;
 
   return (
     <main style={{ padding: 24, display: "grid", gap: 16, maxWidth: 1100, margin: "0 auto" }}>
       <div className="card">
         <div style={{ display: "flex", justifyContent: "space-between" }}>
           <div>
-            <strong>TradeGenuis-style Paper Trader</strong>
-            <span className="muted"> (JEV, simulation only)</span>
+            <strong>Jev Perp Paper Trader</strong>
+            <span className="muted"> (simulation only, live from Neon)</span>
           </div>
           <div>
             账户权益 ${equity.toFixed(2)}{" "}
@@ -56,72 +91,85 @@ export default function Page() {
             </span>
           </div>
         </div>
-        <Sparkline values={mockEquityCurve} />
+        <Sparkline values={equityCurve} />
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
         <div className="card">
-          <strong>当前持仓 ({mockPositions.length})</strong>
-          <table>
-            <thead>
-              <tr><th>品种</th><th>方向</th><th>开仓成本</th><th>盈亏%</th><th>置信度</th></tr>
-            </thead>
-            <tbody>
-              {mockPositions.map((p) => (
-                <tr key={p.symbol}>
-                  <td>{p.symbol}</td>
-                  <td>{p.side}</td>
-                  <td>{p.entry}</td>
-                  <td className={p.pnlPct >= 0 ? "green" : "red"}>{p.pnlPct}%</td>
-                  <td>{p.confidence}%</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <strong>当前持仓 ({positions.length})</strong>
+          {positions.length === 0 ? (
+            <p className="muted">NO POSITION — 尚未写入任何持仓记录。</p>
+          ) : (
+            <table>
+              <thead>
+                <tr><th>品种</th><th>方向</th><th>开仓成本</th><th>数量</th><th>开仓时间</th></tr>
+              </thead>
+              <tbody>
+                {positions.map((p, i) => (
+                  <tr key={i}>
+                    <td>{p.symbol}</td>
+                    <td>{p.side}</td>
+                    <td>{p.entry_price}</td>
+                    <td>{p.size}</td>
+                    <td className="muted">{new Date(p.opened_at).toLocaleString()}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </div>
 
         <div className="card">
           <strong>AI 决策</strong>
-          <table>
-            <thead>
-              <tr><th>品种</th><th>结论</th><th>置信</th><th>时间</th></tr>
-            </thead>
-            <tbody>
-              {mockDecisions.map((d, i) => (
-                <tr key={i}>
-                  <td>{d.symbol}</td>
-                  <td>{d.label}</td>
-                  <td>{d.confidence}</td>
-                  <td className="muted">{d.time}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          {decisions.length === 0 ? (
+            <p className="muted">NO DECISION — 暂无决策记录。</p>
+          ) : (
+            <table>
+              <thead>
+                <tr><th>品种</th><th>档位</th><th>置信</th><th>需人工审批</th><th>时间</th></tr>
+              </thead>
+              <tbody>
+                {decisions.map((d, i) => (
+                  <tr key={i}>
+                    <td>{d.symbol}</td>
+                    <td>{d.size_tier ?? "-"}</td>
+                    <td>{d.confidence ?? "-"}</td>
+                    <td>{d.needs_human_approval ? "是" : "否"}</td>
+                    <td className="muted">{new Date(d.decided_at).toLocaleString()}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </div>
       </div>
 
       <div className="card">
         <strong>成交记录</strong>
-        <table>
-          <thead>
-            <tr><th>品种</th><th>动作</th><th>价格</th><th>盈亏</th><th>时间</th></tr>
-          </thead>
-          <tbody>
-            {mockFills.map((f, i) => (
-              <tr key={i}>
-                <td>{f.symbol}</td>
-                <td>{f.action}</td>
-                <td>{f.price}</td>
-                <td>{f.pnl}</td>
-                <td className="muted">{f.time}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        {fills.length === 0 ? (
+          <p className="muted">NO FILL — 暂无成交记录。</p>
+        ) : (
+          <table>
+            <thead>
+              <tr><th>品种</th><th>动作</th><th>价格</th><th>盈亏</th><th>时间</th></tr>
+            </thead>
+            <tbody>
+              {fills.map((f, i) => (
+                <tr key={i}>
+                  <td>{f.symbol}</td>
+                  <td>{f.action}</td>
+                  <td>{f.price}</td>
+                  <td>{f.pnl}</td>
+                  <td className="muted">{new Date(f.filled_at).toLocaleString()}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </div>
 
       <p className="muted">
-        全部为模拟数据（simulation only）。尚未连接真实交易所账户或真实资金。
+        数据实时从 Neon Postgres 读取。目前表为空，因为还没有实际写入任何模拟交易数据。全部为模拟数据，未连接真实交易所账户或真实资金。
       </p>
     </main>
   );
