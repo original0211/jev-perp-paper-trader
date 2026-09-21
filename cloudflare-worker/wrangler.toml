@@ -1,4 +1,4 @@
-name = "jev-tick-trigger"
+name = "jev-perp-paper-trader"
 main = "src/index.ts"
 compatibility_date = "2026-09-01"
 
@@ -15,5 +15,8 @@ TARGET_URL = "https://jev-perp-paper-trader.vercel.app/api/tick"
 
 # CRON_SECRET must be set as a Worker secret, NOT here (never commit secrets):
 #   wrangler secret put CRON_SECRET
-# or via the Cloudflare dashboard: Workers & Pages > jev-tick-trigger > Settings > Variables and Secrets.
+# (run from inside the cloudflare-worker directory, after `name` above matches
+# the Worker you actually see in the Cloudflare dashboard — otherwise the CLI
+# binds the secret to a different, non-deployed Worker with the same repo but
+# a mismatched name.)
 # Its value must exactly match the CRON_SECRET env var configured on the Vercel project.
