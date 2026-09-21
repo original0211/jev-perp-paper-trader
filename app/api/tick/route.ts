@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { getClient, buildState, routeDecision } from "@/lib/jev";
 import { query } from "@/lib/db";
 import { RISK_LIMITS, sizeTierToUsd } from "@/lib/risk";
@@ -32,14 +32,19 @@ async function loadPrices(): Promise<Record<string, number>> {
   return bySymbol;
 }
 
-// GET /api/tick — read-only market data in (CoinGecko), Jev triage/sizing/approval
-// decisions logged, and a deterministic momentum heuristic (lib/momentum.ts) supplies
-// direction — something Jev intentionally never provides. A simulated position is only
-// opened when ALL of the following hold: Jev says size_tier > 0, Jev says no human
-// approval is needed, momentum gives a clear direction, no existing open position for
-// that symbol, and the concurrent-position risk limit isn't exceeded. Everything here
-// is simulation only — no real exchange account or funds are touched.
-export async function GET() {
+// GET /api/tick — called by Vercel Cron (daily, see vercel.json) or manually for testing.
+// Requires Authorization: Bearer <CRON_SECRET> in production so random visitors can't
+// trigger paid Jev API calls. Reads public market data (CoinGecko), routes through Jev
+// for triage/sizing/approval, applies a deterministic momentum heuristic for direction
+// (Jev itself never decides direction), and only opens a simulated position when Jev's
+// sizing + momentum direction + risk limits all agree. Simulation only — no real funds.
+export async function GET(request: NextRequest) {
+  const cronSecret = process.env.CRON_SECRET;
+  const authHeader = request.headers.get("authorization");
+  if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+
   if (process.env.KILL_SWITCH === "true") {
     return NextResponse.json({ status: "killed", message: "KILL_SWITCH is active. No action taken." });
   }
