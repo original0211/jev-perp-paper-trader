@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 import { getClient, buildState, routeDecision } from "@/lib/jev";
 import { query } from "@/lib/db";
+import { RISK_LIMITS, sizeTierToUsd } from "@/lib/risk";
+import { simulateFill } from "@/lib/paper-engine";
+import { computeMomentum } from "@/lib/momentum";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 30;
@@ -12,8 +15,7 @@ const WATCHLIST: Record<string, string> = {
   AVAXUSDT: "avalanche-2",
 };
 const STARTING_EQUITY = 10000;
-
-const priceCache = new Map<string, number>();
+const MOMENTUM_LOOKBACK_TICKS = 6;
 
 async function loadPrices(): Promise<Record<string, number>> {
   const ids = Object.values(WATCHLIST).join(",");
@@ -30,12 +32,13 @@ async function loadPrices(): Promise<Record<string, number>> {
   return bySymbol;
 }
 
-// GET /api/tick — read-only market data in (CoinGecko, no region restrictions), Jev
-// triage/sizing/approval decisions logged. Does NOT open simulated positions yet:
-// Jev is a router and deliberately never decides market direction, and no separate
-// forecasting module exists in this project yet to supply one. This endpoint only
-// reads public market data and writes decision/telemetry rows — safe to run on a
-// schedule as-is.
+// GET /api/tick — read-only market data in (CoinGecko), Jev triage/sizing/approval
+// decisions logged, and a deterministic momentum heuristic (lib/momentum.ts) supplies
+// direction — something Jev intentionally never provides. A simulated position is only
+// opened when ALL of the following hold: Jev says size_tier > 0, Jev says no human
+// approval is needed, momentum gives a clear direction, no existing open position for
+// that symbol, and the concurrent-position risk limit isn't exceeded. Everything here
+// is simulation only — no real exchange account or funds are touched.
 export async function GET() {
   if (process.env.KILL_SWITCH === "true") {
     return NextResponse.json({ status: "killed", message: "KILL_SWITCH is active. No action taken." });
@@ -58,6 +61,16 @@ export async function GET() {
       continue;
     }
     try {
+      await query("INSERT INTO price_ticks (symbol, price) VALUES ($1, $2)", [symbol, markPrice]);
+
+      const recentTicks = await query<{ price: string; recorded_at: string }>(
+        "SELECT price, recorded_at FROM price_ticks WHERE symbol = $1 ORDER BY recorded_at DESC LIMIT $2",
+        [symbol, MOMENTUM_LOOKBACK_TICKS]
+      );
+      const momentum = computeMomentum(
+        recentTicks.map((t) => ({ price: Number(t.price), recorded_at: t.recorded_at }))
+      );
+
       const openPositions = await query<any>(
         "SELECT * FROM positions WHERE symbol = $1 AND status = 'open'",
         [symbol]
@@ -72,9 +85,6 @@ export async function GET() {
       const decision: any = await routeDecision(client, state);
       const answers = decision?.answers ?? {};
 
-      // NOTE: field names below follow the documented System One response shape
-      // (answers.<id>.noul / .score / .confidence). Verify against the live API
-      // response on first run and adjust here if the JS SDK shapes this differently.
       const needsResearch = answers.needs_research?.noul ?? null;
       const sizeScore = answers.size_tier?.score ?? null;
       const sizeConfidence = answers.size_tier?.confidence ?? null;
@@ -90,11 +100,55 @@ export async function GET() {
           sizeTier,
           needsApproval != null ? needsApproval > 0.5 : null,
           sizeConfidence,
-          JSON.stringify({ state, answers }),
+          JSON.stringify({ state, answers, momentum }),
         ]
       );
 
-      results.push({ symbol, markPrice, sizeTier, needsApproval, action: "logged_only" });
+      let action = "logged_only";
+
+      const openCountRows = await query<{ count: string }>(
+        "SELECT COUNT(*) as count FROM positions WHERE status = 'open'"
+      );
+      const openCount = Number(openCountRows[0]?.count ?? 0);
+
+      const canOpen =
+        sizeTier != null &&
+        sizeTier > 0 &&
+        needsApproval != null &&
+        needsApproval <= 0.5 &&
+        momentum.direction != null &&
+        openPositions.length === 0 &&
+        openCount < RISK_LIMITS.MAX_CONCURRENT_POSITIONS;
+
+      if (canOpen) {
+        const usdSize = Math.min(sizeTierToUsd(sizeTier!), RISK_LIMITS.MAX_USD_PER_MARKET);
+        const { position, fill } = simulateFill(symbol, momentum.direction!, usdSize, markPrice);
+
+        await query("INSERT INTO positions (symbol, side, entry_price, size) VALUES ($1, $2, $3, $4)", [
+          position.symbol,
+          position.side,
+          position.entryPrice,
+          position.size,
+        ]);
+        await query("INSERT INTO fills (symbol, action, price, size, pnl) VALUES ($1, $2, $3, $4, $5)", [
+          fill.symbol,
+          fill.action,
+          fill.price,
+          fill.size,
+          fill.pnl,
+        ]);
+        action = "simulated_fill";
+      }
+
+      results.push({
+        symbol,
+        markPrice,
+        sizeTier,
+        needsApproval,
+        momentumDirection: momentum.direction,
+        momentumChangePct: momentum.changePct,
+        action,
+      });
     } catch (err: any) {
       results.push({ symbol, error: err.message });
     }
